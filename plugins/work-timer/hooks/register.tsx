@@ -5,6 +5,8 @@ import type { Clock } from '../types'
 
 const TICK_MS = 1000
 const GAP = 2
+const TOTAL = 'total'
+// Where 0.2 and 0.3 kept the day's time, carried into the total once.
 const TODAY = 'today'
 const TURNS = 12
 const BARS = '▁▂▃▄▅▆▇█'
@@ -22,8 +24,9 @@ const clockRef = { plugin: 'work-timer', key: 'clock' } as const
 const clock = atom(clockRef, null)
 const now = atom({ plugin: 'work-timer', key: 'now' } as const, 0)
 
-// Today's turns are kept by id, so a turn is added once however many copies
-// of the mod hear it end.
+// The counted turns are kept by id, so a turn is added once however many
+// copies of the mod hear it end.
+type Total = { ms: number; turnIds: string[] }
 type Today = { day: string; ms: number; turnIds?: string[] }
 // A session's own clock, kept under its id so reopening it carries on.
 type Saved = { sessionMs: number; lastMs: number | null; turns: number[]; savedAt: number }
@@ -31,13 +34,6 @@ type Saved = { sessionMs: number; lastMs: number | null; turns: number[]; savedA
 const COUNTED = 50
 const SESSION_PREFIX = 'session:'
 const KEEP_SESSION_MS = 30 * 24 * 60 * 60 * 1000
-
-function dayOf(ms: number): string {
-  const date = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
-}
 
 function formatMs(ms: number): string {
   const seconds = Math.floor(ms / 1000)
@@ -57,8 +53,8 @@ function formatMs(ms: number): string {
   return `${s}s`
 }
 
-function fresh(day: string, todayMs: number): Clock {
-  return { sessionMs: 0, lastMs: null, since: null, waitMs: 0, askedAt: null, day, todayMs, turns: [] }
+function fresh(totalMs: number): Clock {
+  return { sessionMs: 0, lastMs: null, since: null, waitMs: 0, askedAt: null, totalMs, turns: [] }
 }
 
 // Time worked in the running turn up to `at`, its waits on the person left out.
@@ -66,11 +62,21 @@ function runningMs(c: Clock, at: number): number {
   return c.since === null ? 0 : Math.max(0, at - c.since - c.waitMs)
 }
 
-// Today's total as every session has stored it; another day's counts for nothing.
-function storedToday(value: unknown, day: string): number {
-  const today = value as Today | undefined
+// The total as every session has stored it; the first time, what an earlier
+// version kept for the day starts it.
+async function storedTotal($: EngineInterface): Promise<Total> {
+  const total = (await $.store.get(TOTAL)) as Total | undefined
 
-  return today?.day === day ? today.ms : 0
+  if (total !== undefined) {
+    return total
+  }
+
+  const today = (await $.store.get(TODAY)) as Today | undefined
+  const carried: Total = { ms: today?.ms ?? 0, turnIds: today?.turnIds ?? [] }
+  await $.store.set(TOTAL, carried)
+  await $.store.delete(TODAY)
+
+  return carried
 }
 
 // Sessions untouched for a month are forgotten, so the store stays small.
@@ -123,16 +129,15 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const at = await $.clock.now()
-    const day = dayOf(at)
-    const todayMs = storedToday(await $.store.get(TODAY), day)
+    const { ms: totalMs } = await storedTotal($)
     // A session reopened (a new process) carries on from what it saved.
     const saved = (await $.store.get(SESSION_PREFIX + (await $.session.id()))) as Saved | undefined
     const resumed = saved === undefined ? {} : { sessionMs: saved.sessionMs, lastMs: saved.lastMs, turns: saved.turns }
     // A clock kept from before turns were recorded has none.
     await update($, clock, before =>
       before === null
-        ? { ...fresh(day, todayMs), ...resumed }
-        : { ...before, day, todayMs, turns: before.turns ?? [] },
+        ? { ...fresh(totalMs), ...resumed }
+        : { ...before, totalMs, turns: before.turns ?? [] },
     )
     await update($, now, () => at)
     await pruneSessions($, at)
@@ -204,15 +209,13 @@ export const register: Register = on => {
     }
 
     const worked = runningMs(value, value.askedAt ?? at)
-    const day = dayOf(at)
-    // Read again at the end: other sessions add to today as well.
-    const stored = (await $.store.get(TODAY)) as Today | undefined
-    const counted = stored?.day === day ? (stored.turnIds ?? []) : []
-    const isCounted = counted.includes(e.turnId)
-    const todayMs = storedToday(stored, day) + (isCounted ? 0 : worked)
+    // Read again at the end: other sessions add to the total as well.
+    const stored = await storedTotal($)
+    const isCounted = stored.turnIds.includes(e.turnId)
+    const totalMs = stored.ms + (isCounted ? 0 : worked)
 
     if (!isCounted) {
-      await $.store.set(TODAY, { day, ms: todayMs, turnIds: [...counted, e.turnId].slice(-COUNTED) } satisfies Today)
+      await $.store.set(TOTAL, { ms: totalMs, turnIds: [...stored.turnIds, e.turnId].slice(-COUNTED) } satisfies Total)
     }
 
     await update($, clock, c =>
@@ -225,8 +228,7 @@ export const register: Register = on => {
             since: null,
             waitMs: 0,
             askedAt: null,
-            day,
-            todayMs,
+            totalMs,
             turns: [...c.turns, worked].slice(-TURNS),
           },
     )
@@ -260,7 +262,6 @@ export const register: Register = on => {
     const isRunning = c.since !== null
     const isAsking = c.askedAt !== null
     const turnMs = runningMs(c, c.askedAt ?? at)
-    const todayMs = (c.day === dayOf(at) ? c.todayMs : 0) + turnMs
     const turns = isRunning ? [...c.turns, turnMs].slice(-TURNS) : c.turns
 
     const state: { word: string; color: Color; ms: number | null } = isAsking
@@ -274,9 +275,9 @@ export const register: Register = on => {
     const isDim = isRunning && !isAsking && Math.floor(at / TICK_MS) % 2 === 1
     const time = state.ms === null ? '' : formatMs(state.ms)
     const session = formatMs(c.sessionMs + turnMs)
-    const today = formatMs(todayMs)
+    const total = formatMs(c.totalMs + turnMs)
 
-    // One line whatever the width: today gives way first, then the chart, then
+    // One line whatever the width: the total gives way first, then the chart, then
     // the session. The chart counts its own columns: bars, or a fixed slot for
     // the drawing.
     const chartColumns = Svg === null ? turns.length : CHART_COLUMNS
@@ -285,7 +286,7 @@ export const register: Register = on => {
     room -= hasSession ? GAP + 'Sesión '.length + session.length : 0
     const hasChart = turns.length > 1 && room >= GAP + chartColumns
     room -= hasChart ? GAP + chartColumns : 0
-    const hasToday = room >= GAP + 'Hoy '.length + today.length
+    const hasTotal = room >= GAP + 'Total '.length + total.length
 
     return (
       <Box key="work-timer" flexDirection="row" alignItems="center" gap={GAP}>
@@ -324,13 +325,13 @@ export const register: Register = on => {
             <Text tabular>{session}</Text>
           </Box>
         ) : null}
-        {hasToday ? (
-          <Box key="today" flexDirection="row" gap={1}>
+        {hasTotal ? (
+          <Box key="total" flexDirection="row" gap={1}>
             <Text color="subtle" size="caption">
-              Hoy
+              Total
             </Text>
             <Text tabular dimColor>
-              {today}
+              {total}
             </Text>
           </Box>
         ) : null}

@@ -6,8 +6,7 @@ export type Clock = {
   since: number | null
   waitMs: number
   askedAt: number | null
-  day: string
-  todayMs: number
+  totalMs: number
   turns: number[]
 }
 

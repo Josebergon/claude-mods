@@ -46,7 +46,7 @@ function engine(on: On, entries: Record<string, unknown> = {}): MockClock {
   return clock
 }
 
-// Each part of the band by its key: the state, the chart, the session, today.
+// Each part of the band by its key: the state, the chart, the session, the total.
 async function band($: Engine, surface: Surface, props = {}) {
   const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, ...props } })
   const part = async (key: string) => ui.find({ key })
@@ -55,7 +55,7 @@ async function band($: Engine, surface: Surface, props = {}) {
     state: (await part('state'))?.text,
     chart: await part('chart'),
     session: (await part('session'))?.text,
-    today: (await part('today'))?.text,
+    total: (await part('total'))?.text,
     svgs: await ui.findAll({ type: 'Svg' }),
   }
 }
@@ -101,7 +101,7 @@ test('counts a turn while it runs and once it ends, on every surface', async ($,
     expect(now.state).toContain('Último turno')
     expect(now.state).toContain('1m 05s')
     expect(now.session).toContain('1m 05s')
-    expect(now.today).toContain('1m 05s')
+    expect(now.total).toContain('1m 05s')
   }
 })
 
@@ -124,14 +124,8 @@ test('leaves out a question put to the person, and subagent turns', async ($, on
   expect((await band($, 'desktop')).state).toContain('30s')
 })
 
-test('adds to what other sessions stored today', async ($, on) => {
-  const day = (ms: number) => {
-    const d = new Date(ms)
-    const pad = (n: number) => String(n).padStart(2, '0')
-
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  }
-  const clock = engine(on, { today: { day: day(NOON), ms: 3_600_000 } })
+test('adds to the total every session stored, whatever the day', async ($, on) => {
+  const clock = engine(on, { total: { ms: 3_600_000, turnIds: [] } })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
   await turn($, 't1')
@@ -140,7 +134,7 @@ test('adds to what other sessions stored today', async ($, on) => {
 
   const now = await band($, 'desktop')
   expect(now.session).toContain('2m 00s')
-  expect(now.today).toContain('1h 02m')
+  expect(now.total).toContain('1h 02m')
 })
 
 test('charts the turns: a drawing on desktop, block bars on the terminal', async ($, on) => {
@@ -166,7 +160,7 @@ test('charts the turns: a drawing on desktop, block bars on the terminal', async
   expect(terminal.chart?.text).toBe('▄█')
 })
 
-test('drops today, then the chart, then the session as the band narrows', async ($, on) => {
+test('drops the total, then the chart, then the session as the band narrows', async ($, on) => {
   const clock = engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   for (const id of ['t1', 't2']) {
@@ -176,7 +170,7 @@ test('drops today, then the chart, then the session as the band narrows', async 
   }
 
   const narrow = await band($, 'terminal', { bodyColumns: 48 })
-  expect(narrow.today).toBeUndefined()
+  expect(narrow.total).toBeUndefined()
   expect(narrow.session).toBeDefined()
 
   const narrowest = await band($, 'terminal', { bodyColumns: 20 })
@@ -226,20 +220,27 @@ test('saves the session as each turn ends, and forgets month-old ones', async ($
   expect(store.get(`session:${SESSION_ID}`)).toMatchObject({ sessionMs: 45_000, lastMs: 45_000, turns: [45_000] })
 })
 
-test('adds a turn to today once, however many copies hear it end', async ($, on) => {
-  const day = (ms: number) => {
-    const d = new Date(ms)
-    const pad = (n: number) => String(n).padStart(2, '0')
-
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  }
+test('adds a turn to the total once, however many copies hear it end', async ($, on) => {
   // Another copy already counted t1's 20 seconds.
-  const clock = engine(on, { today: { day: day(NOON), ms: 20_000, turnIds: ['t1'] } })
+  const clock = engine(on, { total: { ms: 20_000, turnIds: ['t1'] } })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await turn($, 't1')
   await clock.advance(20_000)
   await complete($, 't1')
 
-  expect((await band($, 'desktop')).today).toContain('20s')
-  expect(store.get('today')).toMatchObject({ ms: 20_000 })
+  expect((await band($, 'desktop')).total).toContain('20s')
+  expect(store.get('total')).toMatchObject({ ms: 20_000 })
+})
+
+test('starts the total from the day an earlier version kept, once', async ($, on) => {
+  const clock = engine(on, { today: { day: '2026-10-23', ms: 1_800_000, turnIds: ['old'] } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  expect(store.get('today')).toBeUndefined()
+  expect(store.get('total')).toMatchObject({ ms: 1_800_000, turnIds: ['old'] })
+
+  await turn($, 't1')
+  await clock.advance(60_000)
+  await complete($, 't1')
+  expect((await band($, 'desktop')).total).toContain('31m 00s')
 })
