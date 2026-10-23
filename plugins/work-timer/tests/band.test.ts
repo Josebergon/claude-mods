@@ -19,11 +19,21 @@ const BAND = {
   },
 } as const
 
-// Stands for the engine beneath the mod: the events it hooks, and a question
-// the person takes 30 seconds to answer.
-function engine(on: On, store: Record<string, unknown> = {}): MockClock {
+const SESSION_ID = 'session-1'
+
+// The mod's store as the engine keeps it, read back by the tests.
+let store = new Map<string, unknown>()
+
+// Stands for the engine beneath the mod: the events it hooks, its store, the
+// session's id, and a question the person takes 30 seconds to answer.
+function engine(on: On, entries: Record<string, unknown> = {}): MockClock {
   const clock = mock.clock(on, { now: NOON })
-  mock.store(on, store)
+  store = new Map(Object.entries(entries))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => (store.set(e.key, e.value), { value: undefined }))
+  on('store.delete', (_, e) => (store.delete(e.key), { value: undefined }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('session.id', () => ({ value: SESSION_ID }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -183,4 +193,53 @@ test('shows nothing a survey would fight for', async ($, on) => {
   await expect(
     $.ui.mount({ ...BAND, surface: 'desktop', props: { ...BAND.props, hasSurvey: true } }),
   ).rejects.toThrow('no implementation for ui.render')
+})
+
+test('a reopened session carries on from what it saved', async ($, on) => {
+  const clock = engine(on, {
+    [`session:${SESSION_ID}`]: { sessionMs: 600_000, lastMs: 90_000, turns: [30_000, 90_000], savedAt: NOON },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const reopened = await band($, 'desktop')
+  expect(reopened.state).toContain('Último turno')
+  expect(reopened.state).toContain('1m 30s')
+  expect(reopened.session).toContain('10m 00s')
+  expect(reopened.svgs).toHaveLength(1)
+
+  await turn($, 't1')
+  await clock.advance(60_000)
+  await complete($, 't1')
+  expect((await band($, 'desktop')).session).toContain('11m 00s')
+})
+
+test('saves the session as each turn ends, and forgets month-old ones', async ($, on) => {
+  const clock = engine(on, {
+    'session:old': { sessionMs: 1, lastMs: 1, turns: [1], savedAt: NOON - 40 * 24 * 60 * 60 * 1000 },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await turn($, 't1')
+  await clock.advance(45_000)
+  await complete($, 't1')
+
+  expect(store.get('session:old')).toBeUndefined()
+  expect(store.get(`session:${SESSION_ID}`)).toMatchObject({ sessionMs: 45_000, lastMs: 45_000, turns: [45_000] })
+})
+
+test('adds a turn to today once, however many copies hear it end', async ($, on) => {
+  const day = (ms: number) => {
+    const d = new Date(ms)
+    const pad = (n: number) => String(n).padStart(2, '0')
+
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+  // Another copy already counted t1's 20 seconds.
+  const clock = engine(on, { today: { day: day(NOON), ms: 20_000, turnIds: ['t1'] } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await turn($, 't1')
+  await clock.advance(20_000)
+  await complete($, 't1')
+
+  expect((await band($, 'desktop')).today).toContain('20s')
+  expect(store.get('today')).toMatchObject({ ms: 20_000 })
 })

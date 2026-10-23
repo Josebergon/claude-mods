@@ -15,7 +15,8 @@ Shows how long Claude has actually been working, in the band above the prompt:
 - Counts only while Claude runs a turn: time waiting for you to write is left out.
 - Stops the clock while Claude waits on your answer to one of its questions (`⏸ Esperándote`).
 - Subagents running in parallel count as wall-clock time, not summed.
-- "Hoy" adds up every session on this machine today.
+- "Hoy" adds up every session on this machine today, each turn once even if the mod is loaded twice.
+- A session reopened later (a new day, a restart) carries on with its own time and bars; sessions untouched for 30 days are forgotten.
 
 Permission prompts are not subtracted (mods cannot see that wait).
 

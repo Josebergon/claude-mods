@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Color, Register, Timer } from 'claude-code'
+import type { Color, EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Clock } from '../types'
 
@@ -22,7 +22,15 @@ const clockRef = { plugin: 'work-timer', key: 'clock' } as const
 const clock = atom(clockRef, null)
 const now = atom({ plugin: 'work-timer', key: 'now' } as const, 0)
 
-type Today = { day: string; ms: number }
+// Today's turns are kept by id, so a turn is added once however many copies
+// of the mod hear it end.
+type Today = { day: string; ms: number; turnIds?: string[] }
+// A session's own clock, kept under its id so reopening it carries on.
+type Saved = { sessionMs: number; lastMs: number | null; turns: number[]; savedAt: number }
+
+const COUNTED = 50
+const SESSION_PREFIX = 'session:'
+const KEEP_SESSION_MS = 30 * 24 * 60 * 60 * 1000
 
 function dayOf(ms: number): string {
   const date = new Date(ms)
@@ -65,6 +73,21 @@ function storedToday(value: unknown, day: string): number {
   return today?.day === day ? today.ms : 0
 }
 
+// Sessions untouched for a month are forgotten, so the store stays small.
+async function pruneSessions($: EngineInterface, at: number) {
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(SESSION_PREFIX)) {
+      continue
+    }
+
+    const saved = (await $.store.get(key)) as Saved | undefined
+
+    if (saved === undefined || at - saved.savedAt > KEEP_SESSION_MS) {
+      await $.store.delete(key)
+    }
+  }
+}
+
 function chartText(turns: readonly number[]): string {
   const max = Math.max(1, ...turns)
 
@@ -102,11 +125,17 @@ export const register: Register = on => {
     const at = await $.clock.now()
     const day = dayOf(at)
     const todayMs = storedToday(await $.store.get(TODAY), day)
+    // A session reopened (a new process) carries on from what it saved.
+    const saved = (await $.store.get(SESSION_PREFIX + (await $.session.id()))) as Saved | undefined
+    const resumed = saved === undefined ? {} : { sessionMs: saved.sessionMs, lastMs: saved.lastMs, turns: saved.turns }
     // A clock kept from before turns were recorded has none.
     await update($, clock, before =>
-      before === null ? fresh(day, todayMs) : { ...before, day, todayMs, turns: before.turns ?? [] },
+      before === null
+        ? { ...fresh(day, todayMs), ...resumed }
+        : { ...before, day, todayMs, turns: before.turns ?? [] },
     )
     await update($, now, () => at)
+    await pruneSessions($, at)
 
     // Reloaded mid-turn: the turn's clock is kept, its ticker is not.
     const { value } = await $.state.get(clockRef)
@@ -177,8 +206,15 @@ export const register: Register = on => {
     const worked = runningMs(value, value.askedAt ?? at)
     const day = dayOf(at)
     // Read again at the end: other sessions add to today as well.
-    const todayMs = storedToday(await $.store.get(TODAY), day) + worked
-    await $.store.set(TODAY, { day, ms: todayMs } satisfies Today)
+    const stored = (await $.store.get(TODAY)) as Today | undefined
+    const counted = stored?.day === day ? (stored.turnIds ?? []) : []
+    const isCounted = counted.includes(e.turnId)
+    const todayMs = storedToday(stored, day) + (isCounted ? 0 : worked)
+
+    if (!isCounted) {
+      await $.store.set(TODAY, { day, ms: todayMs, turnIds: [...counted, e.turnId].slice(-COUNTED) } satisfies Today)
+    }
+
     await update($, clock, c =>
       c === null
         ? c
@@ -195,6 +231,16 @@ export const register: Register = on => {
           },
     )
     await update($, now, () => at)
+
+    const { value: after } = await $.state.get(clockRef)
+    if (after != null) {
+      await $.store.set(SESSION_PREFIX + (await $.session.id()), {
+        sessionMs: after.sessionMs,
+        lastMs: after.lastMs,
+        turns: after.turns,
+        savedAt: at,
+      } satisfies Saved)
+    }
 
     return result
   })
