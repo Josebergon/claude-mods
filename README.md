@@ -7,9 +7,11 @@ Mods for Claude Code.
 Shows how long Claude has actually been working, in the band above the prompt:
 
 ```
-⏱ Trabajando 1m 05s  Sesión 14m 20s  Hoy 1h 02m
+● Trabajando 1m 23s  ▂▃▁▄▆▂▁▅█▃▂▃  Sesión 23m 38s  Hoy 23m 38s
 ```
 
+- A status dot in the theme's colors: Claude orange while working (it breathes with the clock), violet while waiting on you, green once a turn ends.
+- A sparkline of the last 12 turns, the running one in orange: drawn as SVG in the desktop app, as block bars in the terminal.
 - Counts only while Claude runs a turn: time waiting for you to write is left out.
 - Stops the clock while Claude waits on your answer to one of its questions (`⏸ Esperándote`).
 - Subagents running in parallel count as wall-clock time, not summed.

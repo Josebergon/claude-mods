@@ -3,6 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const SURFACES = ['terminal', 'desktop'] as const
+type Surface = (typeof SURFACES)[number]
 // Noon, so no test crosses midnight in any timezone the machine sits in.
 const NOON = new Date(2026, 9, 23, 12).getTime()
 const BAND = {
@@ -35,11 +36,18 @@ function engine(on: On, store: Record<string, unknown> = {}): MockClock {
   return clock
 }
 
-async function line($: Engine, surface: (typeof SURFACES)[number]) {
-  const ui = await $.ui.mount({ ...BAND, surface })
-  const band = await ui.find({ key: 'work-timer' })
+// Each part of the band by its key: the state, the chart, the session, today.
+async function band($: Engine, surface: Surface, props = {}) {
+  const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, ...props } })
+  const part = async (key: string) => ui.find({ key })
 
-  return band?.text
+  return {
+    state: (await part('state'))?.text,
+    chart: await part('chart'),
+    session: (await part('session'))?.text,
+    today: (await part('today'))?.text,
+    svgs: await ui.findAll({ type: 'Svg' }),
+  }
 }
 
 async function turn($: Engine, id: string, agentId?: string) {
@@ -61,12 +69,17 @@ test('counts a turn while it runs and once it ends, on every surface', async ($,
   const clock = engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
+  for (const surface of SURFACES) {
+    expect((await band($, surface)).state).toContain('Sin turnos aún')
+  }
+
   await turn($, 't1')
   await clock.advance(5_000)
   for (const surface of SURFACES) {
-    const text = await line($, surface)
-    expect(text).toContain('Trabajando 5s')
-    expect(text).toContain('Sesión 5s')
+    const now = await band($, surface)
+    expect(now.state).toContain('Trabajando')
+    expect(now.state).toContain('5s')
+    expect(now.session).toContain('5s')
   }
 
   await clock.advance(60_000)
@@ -74,10 +87,11 @@ test('counts a turn while it runs and once it ends, on every surface', async ($,
   // Time between turns, waiting on the person, is not counted.
   await clock.advance(600_000)
   for (const surface of SURFACES) {
-    const text = await line($, surface)
-    expect(text).toContain('Último turno 1m 05s')
-    expect(text).toContain('Sesión 1m 05s')
-    expect(text).toContain('Hoy 1m 05s')
+    const now = await band($, surface)
+    expect(now.state).toContain('Último turno')
+    expect(now.state).toContain('1m 05s')
+    expect(now.session).toContain('1m 05s')
+    expect(now.today).toContain('1m 05s')
   }
 })
 
@@ -88,6 +102,8 @@ test('leaves out a question put to the person, and subagent turns', async ($, on
   await turn($, 't1')
   await clock.advance(10_000)
   const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [] })
+  await clock.settle()
+  expect((await band($, 'desktop')).state).toContain('Esperándote')
   await clock.advance(30_000)
   await asked
   await turn($, 'sub', 'agent-1')
@@ -95,10 +111,10 @@ test('leaves out a question put to the person, and subagent turns', async ($, on
   await complete($, 'sub', 'agent-1')
   await complete($, 't1')
 
-  expect(await line($, 'desktop')).toContain('Último turno 30s')
+  expect((await band($, 'desktop')).state).toContain('30s')
 })
 
-test('adds to what other sessions stored today, and drops another day', async ($, on) => {
+test('adds to what other sessions stored today', async ($, on) => {
   const day = (ms: number) => {
     const d = new Date(ms)
     const pad = (n: number) => String(n).padStart(2, '0')
@@ -112,9 +128,51 @@ test('adds to what other sessions stored today, and drops another day', async ($
   await clock.advance(120_000)
   await complete($, 't1')
 
-  const text = await line($, 'desktop')
-  expect(text).toContain('Sesión 2m 00s')
-  expect(text).toContain('Hoy 1h 02m')
+  const now = await band($, 'desktop')
+  expect(now.session).toContain('2m 00s')
+  expect(now.today).toContain('1h 02m')
+})
+
+test('charts the turns: a drawing on desktop, block bars on the terminal', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  // One turn alone draws no chart.
+  await turn($, 't1')
+  await clock.advance(10_000)
+  await complete($, 't1')
+  expect((await band($, 'desktop')).chart).toBeUndefined()
+
+  await turn($, 't2')
+  await clock.advance(40_000)
+  await complete($, 't2')
+
+  const desktop = await band($, 'desktop')
+  expect(desktop.chart).toBeDefined()
+  expect(desktop.svgs).toHaveLength(1)
+
+  const terminal = await band($, 'terminal')
+  expect(terminal.svgs).toHaveLength(0)
+  expect(terminal.chart?.text).toBe('▄█')
+})
+
+test('drops today, then the chart, then the session as the band narrows', async ($, on) => {
+  const clock = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const id of ['t1', 't2']) {
+    await turn($, id)
+    await clock.advance(30_000)
+    await complete($, id)
+  }
+
+  const narrow = await band($, 'terminal', { bodyColumns: 48 })
+  expect(narrow.today).toBeUndefined()
+  expect(narrow.session).toBeDefined()
+
+  const narrowest = await band($, 'terminal', { bodyColumns: 20 })
+  expect(narrowest.chart).toBeUndefined()
+  expect(narrowest.session).toBeUndefined()
+  expect(narrowest.state).toContain('30s')
 })
 
 test('shows nothing a survey would fight for', async ($, on) => {

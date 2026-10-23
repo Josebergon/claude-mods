@@ -8,6 +8,7 @@ export type Clock = {
   askedAt: number | null
   day: string
   todayMs: number
+  turns: number[]
 }
 
 declare module 'claude-code' {
