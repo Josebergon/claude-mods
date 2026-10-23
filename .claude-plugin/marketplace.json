@@ -1,0 +1,12 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "Josebergon" },
+  "description": "Mods for Claude Code: panels, bands and hooks that change its interface.",
+  "plugins": [
+    {
+      "name": "work-timer",
+      "source": "./plugins/work-timer",
+      "description": "Time Claude has spent working, in the band above the prompt: this session and today."
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "work-timer",
+  "version": "0.1.0",
+  "description": "Time Claude has spent working, in the band above the prompt: this session and today.",
+  "author": { "name": "Josebergon" },
+  "types": "./types/index.d.ts"
+}
